@@ -1,10 +1,13 @@
 import os
 from pydantic import BaseModel, Field
+from typing import Optional, List
 from langgraph.graph import StateGraph, END
 from tools import TOOLS
-from groq import Groq
 from langchain_google_genai import ChatGoogleGenerativeAI
+import json
+from langgraph.checkpoint.memory import InMemorySaver
 
+# --- Initialize LLM ---
 os.environ["GOOGLE_API_KEY"] = "AIzaSyAL_soAvn-rgYHGfSzvosTpF7pbBnRapqk"
 client = ChatGoogleGenerativeAI(
     model="gemini-flash-latest",
@@ -12,111 +15,199 @@ client = ChatGoogleGenerativeAI(
     temperature=0.7
 )
 
-# --- Custom Schema for Orchestration ---
+memory_saver = InMemorySaver()
+config1 = {"configurable": {"thread_id": 1}}
+# --- Custom Schemas ---
 class ToolCallRequest(BaseModel):
-    user_query: str = Field(..., description="Natural language request from user")
-    parameters: dict = Field(..., description="Parameters for the selected tool")
+    user_query: str
+    parameters: dict = {}
 
-# --- State ---
 class AgentState(BaseModel):
     request: ToolCallRequest = None
     result: dict = None
     tool_name: str = None
+    memory: dict = {} 
 
+# --- Utility: Detect Missing Schema Fields ---
+def get_missing_schema(tool_name: str, params: dict):
+    if tool_name not in TOOLS:
+        return []
 
-# --- Node: Select Tool with Groq ---
+    input_model, _, _ = TOOLS[tool_name]
+    missing = []
+    for name, field in input_model.model_fields.items():
+        if field.is_required() and (name not in params or params[name] is None):
+            missing.append({
+                "name": name,
+                "description": getattr(field, "description", "No description available"),
+                "type": str(field.annotation)
+            })
+    return missing
+
+# --- Node: Classify Tool ---
 def classify_tool(state: AgentState):
+    print("[Step] Classifying the tool based on user query...")
     user_query = state.request.user_query
-    
-    # Prepare tool descriptions for Groq
-    tool_descriptions = "\n".join([f"{name}: {desc}" for name, (_, _, desc) in TOOLS.items()])
+    tool_descs = "\n".join([f"{name}: {desc}" for name, (_, _, desc) in TOOLS.items()])
     
     prompt = f"""
-    You are an AI orchestrator. A user said: "{user_query}".
-    Available tools:
-    {tool_descriptions}
-    
-    Instructions:
-        1. Choose the most appropriate tool key from the description above.
-        2. Return ONLY the exact tool key. Do NOT add any explanations, punctuation, or quotes.
-        3. If the query does not clearly match any tool, return the key of the closest relevant tool.
-        4. NEVER invent a tool key or return any value not in the list.
-
-    Decide the best tool name to use (just return the tool key: quiz_generator, flashcard_maker, concept_explainer, summary_generator, example_creator, comparison_tool, answer_checker, topic_expansion).
-    """
-    
-    response = client.invoke(prompt)
-    tool_name = response.content.strip().lower()
+        You are an AI orchestrator. User said: "{user_query}". Available tools: {tool_descs}
+        Return ONLY the exact tool key that best matches the query.
+        If no tool matches, return "chat_tool".
+        """
+    tool_name = client.invoke(prompt).content.strip().lower()
+    print(f"[Info] Selected tool: {tool_name}")
     return {"tool_name": tool_name}
 
-
+# --- Node: Extract Parameters ---
 def extract_parameters(state: AgentState):
+    print("[Step] Extracting parameters from user query...")
     user_query = state.request.user_query
     tool_name = state.tool_name
-    
+
     if tool_name not in TOOLS:
-        return {"parameters": {}}
-    
+        print("[Warning] Tool not found in TOOLS. Returning empty parameters.")
+        return {"request": ToolCallRequest(user_query=user_query, parameters={})}
+
     input_model, _, _ = TOOLS[tool_name]
     schema = input_model.model_json_schema()
-    print(f"Schema for {tool_name}: {schema}")
     
     prompt = f"""
-    You are a parameter extractor.
-    User query: "{user_query}"
-    Tool: {tool_name}
-    Expected parameters schema: {schema}
-    
-    Return only a valid JSON object that matches the schema.
-    """
-    
+Extract parameters for tool '{tool_name}' from user query: "{user_query}".
+Schema: {schema}
+- Include only explicitly mentioned or obvious fields.
+- Do NOT assume values for missing fields.
+- Do not set the value of descriptive yourself.
+- Return JSON only.
+"""
     response = client.invoke(prompt)
-    print(f"Raw response for parameters: {response.content}")
-    raw_text = response.content
-    clean_text = raw_text.strip().replace("```json", "").replace("```", "").strip()
-    import json
-    try:
-        params = json.loads(clean_text)
-        "geuy"
-    except:
-        params = {}
+    raw_text = response.content.strip().replace("```json", "").replace("```", "")
     
-    print(f"Extracted parameters for {tool_name}: {params}")
+    try:
+        params = json.loads(raw_text)
+    except:
+        print("[Warning] Failed to parse parameters JSON. Using empty dict.")
+        params = {}
+
+    print(f"[Info] Extracted parameters: {params}")
     return {"request": ToolCallRequest(user_query=user_query, parameters=params)}
 
+# --- Node: Ask Missing Parameters ---
+def ask_missing_params(state: AgentState):
+    missing = get_missing_schema(state.tool_name, state.request.parameters)
+    if not missing:
+        print("[Info] No missing parameters. Proceeding to tool execution.")
+        return {"next_node": "call_tool"}
 
-# --- Node: Call Selected Tool ---
+    # Create a single combined question for all missing fields
+    print("[Info] Missing parameters are", missing)
+    questions = ", ".join([f"{field['name']} ({field['type']})" for field in missing])
+    print(f"[Info] Asking user for: {questions}")
+    prompt_text = (
+        f"[Step] Missing parameters detected for tool '{state.tool_name}': {questions}\n"
+        f"AI: Please provide values for these fields in a single response. "
+        f"If you leave any field empty, I will fill it with default or inferred values.\n"
+        f"User:"
+    )
+    asking_prompt = f"You are an AI assistant helping to fill missing parameters for a tool. Please provide values for: {missing}. Eg: Missing parameters are 'name': 'descriptive', 'description': 'Whether explanation should be descriptive', 'type': <class bool>, then you need to ask question like 'Do you want the explanation to be descriptive? (yes/no)'"
+    asking_text = client.invoke(asking_prompt)
+    asking_text_display = asking_text.content.strip()
+
+    # Ask user input
+    user_response = input(asking_text_display + "\n> ").strip()
+
+    # Combine user response and schema + LLM to parse into structured JSON
+    llm_prompt = f"""
+        You are an intelligent assistant. You need to fill missing parameters for a tool.
+        Tool: {state.tool_name}
+        Missing fields: {missing}
+        User response: "{user_response}"
+        for example, Missing parameters are ['name': 'descriptive', 'description': 'Whether explanation should be descriptive', 'type': <class 'bool'>], then you need to extract the value of 'descriptive' from user response and set it to the type it belongs, if user response does not contain the value of 'descriptive', you need to set it to a sensible default value like False.
+        
+        Rules:
+        - Extract values for missing fields from the user response.
+        - If a value is missing in the user response, infer a sensible default.
+        - Return only a valid JSON object containing all missing fields with their values.
+        - Ensure types match the expected types (e.g., convert "yes"/"no" to boolean).
+        """
+    llm_result = client.invoke(llm_prompt)
+    raw_text = llm_result.content.strip()
+    clean_text = raw_text.replace("```json", "").replace("```", "").strip()
+    print(f"[Info] LLM response for missing params: {clean_text}")
+
+    
+    try:
+        user_values = json.loads(clean_text)
+    except json.JSONDecodeError:
+        print("[Warning] LLM did not return valid JSON. Using defaults for missing fields.")
+        user_values = {}
+        input_model, _, _ = TOOLS[state.tool_name]
+        for name, field in input_model.model_fields.items():
+            if field.is_required() and (name not in state.request.parameters or state.request.parameters[name] is None):
+                if field.annotation == bool:
+                    user_values[name] = False
+                elif field.annotation == int:
+                    user_values[name] = 1
+                else:
+                    user_values[name] = ""
+
+    input_model, _, _ = TOOLS[state.tool_name]
+    for key, value in user_values.items():
+        field_type = input_model.model_fields[key].annotation
+        if field_type == bool and isinstance(value, str):
+            user_values[key] = value.lower() in ["true", "yes", "1"]
+        elif field_type == int:
+            user_values[key] = int(value)
+
+    state.request.parameters.update(user_values)
+    print(f"[Info] Updated parameters after AI parsing: {state.request.parameters}")
+
+# --- Node: Call Tool ---
 def call_tool(state: AgentState):
+    print("[Step] Calling the selected tool with parameters...")
     tool_name = state.tool_name
     params = state.request.parameters
     if tool_name not in TOOLS:
+        print(f"[Error] Unknown tool: {tool_name}")
         return {"result": {"error": f"Unknown tool {tool_name}"}}
-    
+
     input_model, func, _ = TOOLS[tool_name]
-    validated_input = input_model(**params)  # schema validation
+    validated_input = input_model(**params)
     result = func(validated_input)
+    state.memory["last_result"] = result
+    print(f"[Info] Tool execution result: {result}")
     return {"result": result}
 
-
+# --- Graph Setup ---
 graph = StateGraph(AgentState)
-
 graph.add_node("classify_tool", classify_tool)
-graph.add_node("call_tool", call_tool)
 graph.add_node("extract_parameters", extract_parameters)
+graph.add_node("ask_missing_params", ask_missing_params)
+graph.add_node("call_tool", call_tool)
 
 graph.set_entry_point("classify_tool")
 graph.add_edge("classify_tool", "extract_parameters")
-graph.add_edge("extract_parameters", "call_tool")
+graph.add_edge("extract_parameters", "ask_missing_params")
+graph.add_edge("ask_missing_params", "call_tool")
 graph.add_edge("call_tool", END)
 
-workflow = graph.compile()
-
+workflow = graph.compile(checkpointer=memory_saver)
 
 if __name__ == "__main__":
-    request = ToolCallRequest(
-        user_query="Can you evaluate my answer of the photosynthesis question and provide feedback? This is the ans: Photosynthesis is the process of reproduction of plants which they do asexually.",
-        parameters = {"topic": "", "difficulty": "", "num_items": 0, "descriptive": True}
-    )
-    state = AgentState(request=request)
-    result = workflow.invoke(state)
-    print("Final Result:\n", result)
+    config1 = {"configurable": {"thread_id": 1}}
+
+    quit_keywords = ["bye", "quit", "exit"]
+
+    while True:
+        user_input = input("\nEnter your query: ").strip()
+        if user_input.lower() in quit_keywords:
+            print("Exiting... Goodbye!")
+            break
+
+        request = ToolCallRequest(
+            user_query=user_input,
+            parameters={}
+        )
+        state = AgentState(request=request)
+        result = workflow.invoke(state, config=config1)
+        print("\n[Final Result]\n", result)

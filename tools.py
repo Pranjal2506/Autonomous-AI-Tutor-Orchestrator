@@ -1,15 +1,54 @@
-# tools.py
 from pydantic import BaseModel, Field
 import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-# --- Unified Input Model ---
-class ToolInput(BaseModel):
-    topic: str = Field(..., description="The topic, concept, or subject")
+class QuizGeneratorInput(BaseModel):
+    topic: str = Field(..., description="The topic for quiz questions")
     difficulty: str = Field("easy", description="Difficulty level: easy, medium, hard")
-    num_items: int = Field(3, description="Number of questions, flashcards, or explanations")
-    descriptive: bool = Field(True, description="Whether explanation should be descriptive (only used in Concept Explainer)")
-    
+    num_items: int = Field(3, description="Number of quiz questions to generate")
+
+
+class FlashcardMakerInput(BaseModel):
+    topic: str = Field(..., description="The topic for flashcards")
+    num_items: int = Field(3, description="Number of flashcards to create")
+
+
+class ConceptExplainerInput(BaseModel):
+    topic: str = Field(..., description="The topic or concept to explain")
+    difficulty: str = Field("easy", description="Difficulty level: easy, medium, hard")
+    num_items: int = Field(3, description="Number of explanations to generate")
+    descriptive: bool = Field(..., description="Whether explanation should be descriptive")
+
+
+class SummaryGeneratorInput(BaseModel):
+    topic: str = Field(..., description="The topic to summarize")
+    num_items: int = Field(3, description="Number of key points to summarize in")
+
+
+class ExampleCreatorInput(BaseModel):
+    topic: str = Field(..., description="The concept/topic to create examples for")
+    num_items: int = Field(3, description="Number of examples to generate")
+
+
+class ComparisonToolInput(BaseModel):
+    topic: str = Field(..., description="The topic to compare")
+    num_items: int = Field(3, description="Number of comparison points")
+
+
+class AnswerCheckerInput(BaseModel):
+    topic: str = Field(..., description="The topic of the questions to check answers for")
+    num_items: int = Field(3, description="Number of answers to check")
+
+
+class TopicExpansionInput(BaseModel):
+    topic: str = Field(..., description="The topic to expand")
+    num_items: int = Field(3, description="Number of subtopics to generate")
+
+class ChatToolInput(BaseModel):
+    user_query: str = Field(..., description="The query or message from the user to chat with the AI")
+    context: str = Field("", description="Optional context from previous conversation to maintain continuity")
+
+
 os.environ["GOOGLE_API_KEY"] = "AIzaSyAL_soAvn-rgYHGfSzvosTpF7pbBnRapqk"
 llm = ChatGoogleGenerativeAI(
     model="gemini-flash-latest",
@@ -17,92 +56,97 @@ llm = ChatGoogleGenerativeAI(
     temperature=0.7
 )
 
-# --- Tool 1: Quiz Generator ---
-def quiz_generator_tool(input: ToolInput):
+
+def quiz_generator_tool(input: QuizGeneratorInput):
     prompt = f"Generate {input.num_items} {input.difficulty} quiz questions on the topic: {input.topic}."
     response = llm.invoke(prompt)
-    return {
-        response.content
-    }
+    return {"tool": "QuizGenerator", "questions": response.content}
 
-quiz_generator_desc = "Generates practice quiz questions based on topic and difficulty."
 
-# --- Tool 2: Flashcard Maker ---
-def flashcard_maker_tool(input: ToolInput):
+def flashcard_maker_tool(input: FlashcardMakerInput):
+    prompt = f"""
+    Create {input.num_items} flashcards for the topic "{input.topic}".
+    Each flashcard should have a 'question' and an 'answer'.
+    Format output as a numbered list.
+    """
+    response = llm.invoke(prompt)
     return {
         "tool": "FlashcardMaker",
         "topic": input.topic,
-        "flashcards": [
-            {"question": f"What is {input.topic}?", "answer": f"Explanation of {input.topic}"}
-            for _ in range(input.num_items)
-        ]
+        "flashcards": response.content  # raw text from LLM
     }
 
-flashcard_maker_desc = "Creates flashcards for a given topic. Supports examples."
 
-# --- Tool 3: Concept Explainer ---
-def concept_explainer_tool(input: ToolInput):
+def concept_explainer_tool(input: ConceptExplainerInput):
+    style = "descriptive" if input.descriptive else "concise"
+    prompt = f"""
+    Explain the topic "{input.topic}" in {input.num_items} explanations.
+    Difficulty level: {input.difficulty}.
+    Style: {style}.
+    Provide clear and structured explanations.
+    """
+    response = llm.invoke(prompt)
     return {
         "tool": "ConceptExplainer",
         "topic": input.topic,
-        "explanations": [
-            f"This is a {input.difficulty} explanation of {input.topic}."
-            for _ in range(input.num_items)
-        ],
-        "style": "descriptive" if input.descriptive else "concise"
+        "explanations": response.content,  # LLM generates explanations
+        "style": style
     }
 
-concept_explainer_desc = "Explains a concept at a chosen difficulty level. Can be descriptive or concise."
 
-# --- Tool 4: Summary Generator ---
-def summary_generator_tool(input: ToolInput):
+def summary_generator_tool(input: SummaryGeneratorInput):
     prompt = f"Summarize the topic '{input.topic}' in {input.num_items} key points."
     response = llm.invoke(prompt)
     return {"tool": "SummaryGenerator", "summary": response.content}
 
-summary_generator_desc = "Generates a concise summary of a topic in key points."
 
-# --- Tool 5: Example Creator ---
-def example_creator_tool(input: ToolInput):
+def example_creator_tool(input: ExampleCreatorInput):
     prompt = f"Create {input.num_items} examples to illustrate the concept '{input.topic}'."
     response = llm.invoke(prompt)
     return {"tool": "ExampleCreator", "examples": response.content}
 
-example_creator_desc = "Creates practical examples for a given topic or concept."
 
-# --- Tool 6: Comparison Tool ---
-def comparison_tool(input: ToolInput):
+def comparison_tool(input: ComparisonToolInput):
     prompt = f"Compare '{input.topic}' with related concepts in {input.num_items} points."
     response = llm.invoke(prompt)
     return {"tool": "ComparisonTool", "comparison": response.content}
 
-comparison_desc = "Compares a topic with related concepts in a structured format."
 
-# --- Tool 7: Quiz Answer Checker ---
-def answer_checker_tool(input: ToolInput):
+def answer_checker_tool(input: AnswerCheckerInput):
     prompt = f"Check answers for {input.num_items} questions related to '{input.topic}'. Provide correct answers and explanations."
     response = llm.invoke(prompt)
     return {"tool": "AnswerChecker", "checked_answers": response.content}
 
-answer_checker_desc = "Checks answers for given questions and provides corrections and explanations."
 
-# --- Tool 8: Topic Expansion ---
-def topic_expansion_tool(input: ToolInput):
+def topic_expansion_tool(input: TopicExpansionInput):
     prompt = f"Expand the topic '{input.topic}' into {input.num_items} related subtopics or areas of study."
     response = llm.invoke(prompt)
     return {"tool": "TopicExpansion", "expanded_topics": response.content}
 
-topic_expansion_desc = "Generates related subtopics or deeper areas for a given topic."
+def chat_tool(input_data: ChatToolInput):
+    """
+    Generic chat tool for queries that don't match other specific tools.
+    """
+    prompt = f"""
+        You are a helpful AI assistant. User asked: "{input_data.user_query}".
+        {f"Context: {input_data.context}" if input_data.context else ""}
+        Respond concisely and clearly.
+        """
+    response = llm.invoke(prompt).content.strip()
+    return {"response": response}
 
-
-# Export all tools in a dict for orchestration
+# -------------------------------
+# Tools Registry
+# -------------------------------
 TOOLS = {
-    "quiz_generator": (ToolInput, quiz_generator_tool, quiz_generator_desc),
-    "flashcard_maker": (ToolInput, flashcard_maker_tool, flashcard_maker_desc),
-    "concept_explainer": (ToolInput, concept_explainer_tool, concept_explainer_desc),
-    "summary_generator": (ToolInput, summary_generator_tool, summary_generator_desc),
-    "example_creator": (ToolInput, example_creator_tool, example_creator_desc),
-    "comparison_tool": (ToolInput, comparison_tool, comparison_desc),
-    "answer_checker": (ToolInput, answer_checker_tool, answer_checker_desc),
-    "topic_expansion": (ToolInput, topic_expansion_tool, topic_expansion_desc),
+    "quiz_generator": (QuizGeneratorInput, quiz_generator_tool, "Generates practice quiz questions based on topic and difficulty."),
+    "flashcard_maker": (FlashcardMakerInput, flashcard_maker_tool, "Creates flashcards for a given topic."),
+    "concept_explainer": (ConceptExplainerInput, concept_explainer_tool, "Explains a concept at a chosen difficulty level."),
+    "summary_generator": (SummaryGeneratorInput, summary_generator_tool, "Generates a concise summary of a topic in key points."),
+    "example_creator": (ExampleCreatorInput, example_creator_tool, "Creates practical examples for a given topic or concept."),
+    "comparison_tool": (ComparisonToolInput, comparison_tool, "Compares a topic with related concepts."),
+    "answer_checker": (AnswerCheckerInput, answer_checker_tool, "Checks answers and provides corrections."),
+    "topic_expansion": (TopicExpansionInput, topic_expansion_tool, "Generates related subtopics for a given topic."),
+    "chat_tool": (ChatToolInput, chat_tool, "General chat tool for miscellaneous queries."),
+    
 }
