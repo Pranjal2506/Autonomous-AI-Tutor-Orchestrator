@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 import os
 from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
 
 class QuizGeneratorInput(BaseModel):
     topic: str = Field(..., description="The topic for quiz questions")
@@ -49,10 +50,11 @@ class ChatToolInput(BaseModel):
     context: str = Field("", description="Optional context from previous conversation to maintain continuity")
 
 
-os.environ["GOOGLE_API_KEY"] = "AIzaSyAL_soAvn-rgYHGfSzvosTpF7pbBnRapqk"
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
 llm = ChatGoogleGenerativeAI(
     model="gemini-flash-latest",
-    google_api_key=os.environ["GOOGLE_API_KEY"],
+    google_api_key=api_key,
     temperature=0.7
 )
 
@@ -73,7 +75,7 @@ def flashcard_maker_tool(input: FlashcardMakerInput):
     return {
         "tool": "FlashcardMaker",
         "topic": input.topic,
-        "flashcards": response.content  # raw text from LLM
+        "flashcards": response.content 
     }
 
 
@@ -89,7 +91,7 @@ def concept_explainer_tool(input: ConceptExplainerInput):
     return {
         "tool": "ConceptExplainer",
         "topic": input.topic,
-        "explanations": response.content,  # LLM generates explanations
+        "explanations": response.content,
         "style": style
     }
 
@@ -135,9 +137,7 @@ def chat_tool(input_data: ChatToolInput):
     response = llm.invoke(prompt).content.strip()
     return {"response": response}
 
-# -------------------------------
-# Tools Registry
-# -------------------------------
+
 TOOLS = {
     "quiz_generator": (QuizGeneratorInput, quiz_generator_tool, "Generates practice quiz questions based on topic and difficulty."),
     "flashcard_maker": (FlashcardMakerInput, flashcard_maker_tool, "Creates flashcards for a given topic."),
@@ -148,5 +148,5 @@ TOOLS = {
     "answer_checker": (AnswerCheckerInput, answer_checker_tool, "Checks answers and provides corrections."),
     "topic_expansion": (TopicExpansionInput, topic_expansion_tool, "Generates related subtopics for a given topic."),
     "chat_tool": (ChatToolInput, chat_tool, "General chat tool for miscellaneous queries."),
-    
+
 }

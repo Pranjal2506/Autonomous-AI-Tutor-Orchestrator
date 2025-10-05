@@ -6,12 +6,15 @@ from tools import TOOLS
 from langchain_google_genai import ChatGoogleGenerativeAI
 import json
 from langgraph.checkpoint.memory import InMemorySaver
+from dotenv import load_dotenv
 
 # --- Initialize LLM ---
-os.environ["GOOGLE_API_KEY"] = "AIzaSyAL_soAvn-rgYHGfSzvosTpF7pbBnRapqk"
+
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
 client = ChatGoogleGenerativeAI(
     model="gemini-flash-latest",
-    google_api_key=os.environ["GOOGLE_API_KEY"],
+    google_api_key=api_key,
     temperature=0.7
 )
 
@@ -49,7 +52,7 @@ def classify_tool(state: AgentState):
     print("[Step] Classifying the tool based on user query...")
     user_query = state.request.user_query
     tool_descs = "\n".join([f"{name}: {desc}" for name, (_, _, desc) in TOOLS.items()])
-    
+
     prompt = f"""
         You are an AI orchestrator. User said: "{user_query}". Available tools: {tool_descs}
         Return ONLY the exact tool key that best matches the query.
@@ -71,7 +74,7 @@ def extract_parameters(state: AgentState):
 
     input_model, _, _ = TOOLS[tool_name]
     schema = input_model.model_json_schema()
-    
+
     prompt = f"""
 Extract parameters for tool '{tool_name}' from user query: "{user_query}".
 Schema: {schema}
@@ -82,7 +85,7 @@ Schema: {schema}
 """
     response = client.invoke(prompt)
     raw_text = response.content.strip().replace("```json", "").replace("```", "")
-    
+
     try:
         params = json.loads(raw_text)
     except:
@@ -135,7 +138,7 @@ def ask_missing_params(state: AgentState):
     clean_text = raw_text.replace("```json", "").replace("```", "").strip()
     print(f"[Info] LLM response for missing params: {clean_text}")
 
-    
+
     try:
         user_values = json.loads(clean_text)
     except json.JSONDecodeError:
@@ -175,10 +178,8 @@ def call_tool(state: AgentState):
     validated_input = input_model(**params)
     result = func(validated_input)
     state.memory["last_result"] = result
-    print(f"[Info] Tool execution result: {result}")
     return {"result": result}
 
-# --- Graph Setup ---
 graph = StateGraph(AgentState)
 graph.add_node("classify_tool", classify_tool)
 graph.add_node("extract_parameters", extract_parameters)
@@ -210,4 +211,16 @@ if __name__ == "__main__":
         )
         state = AgentState(request=request)
         result = workflow.invoke(state, config=config1)
-        print("\n[Final Result]\n", result)
+        print("\n[Final Result]\n", result.get("result") if isinstance(result, dict) and "result" in result else result)
+
+# def run_workflow(user_input: str):
+#     """Run the LangGraph workflow for a given user query."""
+#     config1 = {"configurable": {"thread_id": 1}}
+
+#     request = ToolCallRequest(
+#         user_query=user_input,
+#         parameters={}
+#     )
+#     state = AgentState(request=request)
+#     result = workflow.invoke(state, config=config1)
+#     return result
